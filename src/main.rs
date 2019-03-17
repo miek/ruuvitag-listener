@@ -1,12 +1,16 @@
 extern crate ble_advert_struct;
+extern crate byteorder;
 #[macro_use]
 extern crate derive_more;
 extern crate rumqtt;
 extern crate serde_json;
 
+mod ruuvipacket;
+
 use ble_advert_struct::BLEAdvert;
 use rumqtt::{MqttClient, MqttOptions, Notification, Publish, QoS};
 use std::env;
+use std::io::Cursor;
 use std::str::from_utf8;
 
 const PKG_NAME: &'static str = env!("CARGO_PKG_NAME");
@@ -19,6 +23,7 @@ fn get_env(s: &str) -> String{
 enum Error {
     Utf8Error(std::str::Utf8Error),
     JsonError(serde_json::Error),
+    InvalidRuuvitagPacket(ruuvipacket::Error),
 }
 
 fn decode_advert(p: &Publish) -> Result<BLEAdvert, Error> {
@@ -45,9 +50,11 @@ fn main() {
                     continue;
                 },
             };
-            println!("{:?}", advert);
-            // TODO: decode
-            // TODO: punt to influxdb
+            let mut data = Cursor::new(&advert.manufacturer_data);
+            println!("{:?}", ruuvipacket::decode(&mut data));
+            if let Ok(packet) = ruuvipacket::decode(&mut data) {
+                // TODO: punt to influxdb
+            }
         }
     }
 }
