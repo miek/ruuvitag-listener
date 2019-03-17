@@ -2,6 +2,8 @@ extern crate ble_advert_struct;
 extern crate byteorder;
 #[macro_use]
 extern crate derive_more;
+#[macro_use]
+extern crate influx_db_client;
 extern crate rumqtt;
 extern crate serde_json;
 
@@ -12,6 +14,7 @@ use rumqtt::{MqttClient, MqttOptions, Notification, Publish, QoS};
 use std::env;
 use std::io::Cursor;
 use std::str::from_utf8;
+use std::time::UNIX_EPOCH;
 
 const PKG_NAME: &'static str = env!("CARGO_PKG_NAME");
 
@@ -24,6 +27,8 @@ enum Error {
     Utf8Error(std::str::Utf8Error),
     JsonError(serde_json::Error),
     InvalidRuuvitagPacket(ruuvipacket::Error),
+    TimeError(std::time::SystemTimeError),
+    InfluxError(influx_db_client::Error),
 }
 
 fn decode_advert(p: &Publish) -> Result<BLEAdvert, Error> {
@@ -32,7 +37,31 @@ fn decode_advert(p: &Publish) -> Result<BLEAdvert, Error> {
     Ok(advert)
 }
 
+fn influx_post(client: &mut influx_db_client::Client, pkt: &ruuvipacket::Packet, advert: &BLEAdvert) -> Result<(), Error> {
+    use influx_db_client::{Point, Points, Value, Precision};
+    let mut point = point!("ruuvi_measurements");
+    point.add_timestamp(advert.time.duration_since(UNIX_EPOCH)?.as_secs() as i64);
+    point.add_field("humidity", Value::Float(pkt.humidity));
+    point.add_field("temperature", Value::Float(pkt.temperature));
+    point.add_field("pressure", Value::Float(pkt.pressure));
+    point.add_field("acceleration_x", Value::Float(pkt.acceleration_x));
+    point.add_field("acceleration_y", Value::Float(pkt.acceleration_y));
+    point.add_field("acceleration_z", Value::Float(pkt.acceleration_z));
+    point.add_field("voltage", Value::Float(pkt.voltage));
+    point.add_tag("mac", Value::String(advert.mac.clone()));
+    point.add_tag("listener", Value::String(advert.listener.clone()));
+
+    let points = points!(point);
+    let _ = client.write_points(points, Some(Precision::Seconds), None)?;
+    Ok(())
+}
+
 fn main() {
+    let influx_host = get_env("INFLUX_HOST");
+    let influx_db = get_env("INFLUX_DB");
+
+    let mut influx_client = influx_db_client::Client::new(format!("http://{}:8086", influx_host), influx_db.to_string());
+
     let mqtt_host = get_env("MQTT_HOST");
     let mqtt_topic = get_env("MQTT_TOPIC");
 
@@ -51,9 +80,11 @@ fn main() {
                 },
             };
             let mut data = Cursor::new(&advert.manufacturer_data);
-            println!("{:?}", ruuvipacket::decode(&mut data));
             if let Ok(packet) = ruuvipacket::decode(&mut data) {
-                // TODO: punt to influxdb
+                let result = influx_post(&mut influx_client, &packet, &advert);
+                if result.is_err() {
+                    println!("{:?}", result);
+                }
             }
         }
     }
